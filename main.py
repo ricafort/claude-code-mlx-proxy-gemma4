@@ -499,10 +499,14 @@ async def stream_generate_response(
                         yield get_text_delta(buffer)
                         buffer = ""
                     else:
-                        if last_lt > 0:
-                            yield get_text_delta(buffer[:last_lt])
-                        buffer = buffer[last_lt:]
-                        break
+                        if "<channel|>".startswith(buffer[last_lt:]):
+                            if last_lt > 0:
+                                yield get_text_delta(buffer[:last_lt])
+                            buffer = buffer[last_lt:]
+                            break
+                        else:
+                            yield get_text_delta(buffer)
+                            buffer = ""
                 else:
                     if idx > 0:
                         yield get_text_delta(buffer[:idx])
@@ -517,9 +521,13 @@ async def stream_generate_response(
                         tool_buffer += buffer
                         buffer = ""
                     else:
-                        tool_buffer += buffer[:last_lt]
-                        buffer = buffer[last_lt:]
-                        break
+                        if "<tool_call|>".startswith(buffer[last_lt:]):
+                            tool_buffer += buffer[:last_lt]
+                            buffer = buffer[last_lt:]
+                            break
+                        else:
+                            tool_buffer += buffer
+                            buffer = ""
                 else:
                     tool_buffer += buffer[:idx]
                     buffer = buffer[idx + len("<tool_call|>"):]
