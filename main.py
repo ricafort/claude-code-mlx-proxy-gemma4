@@ -433,6 +433,7 @@ async def generate_response(request: MessagesRequest, prompt: str, input_tokens:
         prompt=prompt,
         max_tokens=request.max_tokens,
         verbose=config.VERBOSE,
+        kv_bits=config.KV_BITS,
     )
     
     # Handle mlx_vlm's GenerationResult object return type
@@ -491,7 +492,7 @@ async def stream_generate_response(
         d = {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": t}}
         return f"event: content_block_delta\ndata: {json.dumps(d)}\n\n"
 
-    for i, response in enumerate(stream_generate_func(model, tokenizer, prompt=prompt, max_tokens=request.max_tokens)):
+    for i, response in enumerate(stream_generate_func(model, tokenizer, prompt=prompt, max_tokens=request.max_tokens, kv_bits=config.KV_BITS)):
         chunk = response.text
         full_text += chunk
         buffer += chunk
