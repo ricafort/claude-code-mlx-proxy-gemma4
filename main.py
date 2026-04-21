@@ -431,8 +431,9 @@ async def stream_generate_response(
     tool_buffer = ""
     block_index = 0
     generated_tool = False
+    in_text_block = True
 
-    def emit_text(t: str):
+    def get_text_delta(t: str):
         if not t: return ""
         d = {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": t}}
         return f"event: content_block_delta\ndata: {json.dumps(d)}\n\n"
@@ -446,47 +447,67 @@ async def stream_generate_response(
             if state == "TEXT":
                 idx = buffer.find("<")
                 if idx == -1:
-                    yield emit_text(buffer)
+                    if not in_text_block:
+                        block_index += 1
+                        in_text_block = True
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                    yield get_text_delta(buffer)
                     buffer = ""
                 else:
                     if idx > 0:
-                        yield emit_text(buffer[:idx])
+                        if not in_text_block:
+                            block_index += 1
+                            in_text_block = True
+                            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        yield get_text_delta(buffer[:idx])
                         buffer = buffer[idx:]
                     if len(buffer) < len("<|channel>thought"):
                         if "<|channel>thought".startswith(buffer) or "<|tool_call>".startswith(buffer):
                             break  # wait for more
                         else:
-                            yield emit_text(buffer[0])
+                            if not in_text_block:
+                                block_index += 1
+                                in_text_block = True
+                                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                            yield get_text_delta(buffer[0])
                             buffer = buffer[1:]
                     else:
                         if buffer.startswith("<|channel>thought"):
                             buffer = buffer[len("<|channel>thought"):]
-                            yield emit_text("\n🤔 **Thinking:**\n")
+                            if not in_text_block:
+                                block_index += 1
+                                in_text_block = True
+                                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                            yield get_text_delta("\n🤔 **Thinking:**\n")
                             state = "THOUGHT"
                         elif buffer.startswith("<|tool_call>"):
                             buffer = buffer[len("<|tool_call>"):]
                             state = "TOOL"
                             tool_buffer = ""
                         else:
-                            yield emit_text(buffer[0])
+                            if not in_text_block:
+                                block_index += 1
+                                in_text_block = True
+                                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                            yield get_text_delta(buffer[0])
                             buffer = buffer[1:]
             elif state == "THOUGHT":
                 idx = buffer.find("<channel|>")
                 if idx == -1:
                     last_lt = buffer.rfind("<")
                     if last_lt == -1:
-                        yield emit_text(buffer)
+                        yield get_text_delta(buffer)
                         buffer = ""
                     else:
                         if last_lt > 0:
-                            yield emit_text(buffer[:last_lt])
+                            yield get_text_delta(buffer[:last_lt])
                         buffer = buffer[last_lt:]
                         break
                 else:
                     if idx > 0:
-                        yield emit_text(buffer[:idx])
+                        yield get_text_delta(buffer[:idx])
                     buffer = buffer[idx + len("<channel|>"):]
-                    yield emit_text("\n\n")
+                    yield get_text_delta("\n\n")
                     state = "TEXT"
             elif state == "TOOL":
                 idx = buffer.find("<tool_call|>")
@@ -504,32 +525,41 @@ async def stream_generate_response(
                     buffer = buffer[idx + len("<tool_call|>"):]
                     
                     import re
-                    match = re.match(r'call:(\w+)(.*)', tool_buffer, re.DOTALL)
+                    match = re.match(r'call:(\w+):?\s*(.*)', tool_buffer, re.DOTALL)
                     if match:
                         name = match.group(1)
                         args = match.group(2).strip()
                         if not args: args = "{}"
                         
-                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+                        if in_text_block:
+                            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+                            in_text_block = False
+                            
                         block_index += 1
                         generated_tool = True
                         
-                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'tool_use', 'id': 'toolu_' + name, 'name': name, 'input': {}}})}\n\n"
+                        import random
+                        import string
+                        tool_id = "toolu_01" + "".join(random.choices(string.ascii_letters + string.digits, k=16))
+                        
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'tool_use', 'id': tool_id, 'name': name, 'input': {}}})}\n\n"
                         yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_index, 'delta': {'type': 'input_json_delta', 'partial_json': args}})}\n\n"
                         yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
-                        
-                        block_index += 1
-                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
                         
                     state = "TEXT"
                     tool_buffer = ""
 
     if buffer and state == "TEXT":
-        yield emit_text(buffer)
+        if not in_text_block:
+            block_index += 1
+            in_text_block = True
+            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+        yield get_text_delta(buffer)
     elif state == "THOUGHT" and buffer:
-        yield emit_text(buffer)
+        yield get_text_delta(buffer)
 
-    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+    if in_text_block:
+        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
 
     output_tokens = count_tokens(full_text)
     stop_reason = "tool_use" if generated_tool else "end_turn"
