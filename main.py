@@ -267,13 +267,27 @@ def extract_system_text(
 
 
 def format_messages_for_llama(
-    messages: List[Message], system: Optional[Union[str, List[SystemContent]]] = None
+    messages: List[Message], 
+    system: Optional[Union[str, List[SystemContent]]] = None,
+    tools: Optional[List[Tool]] = None
 ) -> str:
     """Convert Claude-style messages to Llama format"""
     formatted_messages = []
 
     # Add system message if provided
-    system_text = extract_system_text(system)
+    system_text = extract_system_text(system) or ""
+    
+    if tools:
+        import json
+        tools_list = [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in tools]
+        tools_str = json.dumps(tools_list, indent=2)
+        tool_instructions = (
+            "\n\nYou have access to the following tools. You must exclusively use these tools and follow their JSON input_schema strictly.\n"
+            "To use a tool, output exactly:\n<|tool_call>call:<tool_name><json_arguments><tool_call|>\n\n"
+            "Available tools:\n" + tools_str
+        )
+        system_text += tool_instructions
+
     if system_text:
         formatted_messages.append({"role": "system", "content": system_text})
 
@@ -363,7 +377,7 @@ async def create_message(request: MessagesRequest):
 
     try:
         # Format messages for Llama
-        prompt = format_messages_for_llama(request.messages, request.system)
+        prompt = format_messages_for_llama(request.messages, request.system, request.tools)
 
         # Count input tokens
         input_tokens = count_tokens(prompt)
@@ -387,7 +401,7 @@ async def count_tokens_endpoint(request: TokenCountRequest):
 
     try:
         # Format messages for token counting
-        prompt = format_messages_for_llama(request.messages, request.system)
+        prompt = format_messages_for_llama(request.messages, request.system, request.tools)
 
         # Count tokens
         token_count = count_tokens(prompt)
