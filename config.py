@@ -21,7 +21,7 @@ class Config:
     DEFAULT_MAX_TOKENS: int = int(os.getenv("DEFAULT_MAX_TOKENS", "4096"))
     DEFAULT_TEMPERATURE: float = float(os.getenv("DEFAULT_TEMPERATURE", "1.0"))
     DEFAULT_TOP_P: float = float(os.getenv("DEFAULT_TOP_P", "1.0"))
-    MAX_CONTEXT_WINDOW: int = int(os.getenv("MAX_CONTEXT_WINDOW", "40000"))
+    MAX_CONTEXT_WINDOW: int = int(os.getenv("MAX_CONTEXT_WINDOW", "10000"))
     KV_BITS: int = int(os.getenv("KV_BITS", "8"))
 
     # API settings
