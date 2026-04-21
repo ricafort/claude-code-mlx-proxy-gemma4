@@ -7,14 +7,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerFast
-from mlx_lm import load, generate, stream_generate
-from mlx_lm.utils import load_model, _download
+from mlx_lm import load as mlx_lm_load, generate as mlx_lm_generate, stream_generate as mlx_lm_stream_generate
+try:
+    from mlx_vlm import load as mlx_vlm_load, generate as mlx_vlm_generate, stream_generate as mlx_vlm_stream_generate
+    has_vlm = True
+except ImportError:
+    has_vlm = False
+from mlx_lm.utils import load_model, get_model_path
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from config import config
 
 # Global variables for model and tokenizer
 model = None
 tokenizer = None
+# Dynamic generation functions determined at load
+generate_func = mlx_lm_generate
+stream_generate_func = mlx_lm_stream_generate
 
 
 # Content block models
@@ -47,7 +55,7 @@ class SystemContent(BaseModel):
 
 
 class ThinkingConfig(BaseModel):
-    type: Literal["enabled", "disabled"]
+    type: Literal["enabled", "disabled", "adaptive"]
     budget_tokens: Optional[int] = None
 
 
@@ -127,8 +135,21 @@ def _load_model_with_fallback(model_name: str, tokenizer_config: dict):
     the model's tokenizer uses the Transformers v5 TokenizersBackend class which
     is not available in older Transformers installations.
     """
+    global generate_func, stream_generate_func
+    
+    if "gemma-4" in model_name.lower():
+        if has_vlm:
+            print(f"Detected Gemma 4, switching to mlx_vlm loaders...")
+            generate_func = mlx_vlm_generate
+            stream_generate_func = mlx_vlm_stream_generate
+            return mlx_vlm_load(model_name, tokenizer_config_extra=tokenizer_config)
+        else:
+            raise ImportError("mlx_vlm is required to run Gemma 4 models!")
+    
     try:
-        return load(model_name, tokenizer_config=tokenizer_config)
+        generate_func = mlx_lm_generate
+        stream_generate_func = mlx_lm_stream_generate
+        return mlx_lm_load(model_name, tokenizer_config=tokenizer_config)
     except ValueError as e:
         if "TokenizersBackend" not in str(e):
             raise
@@ -141,7 +162,7 @@ def _load_model_with_fallback(model_name: str, tokenizer_config: dict):
 
     # Use cached model files (downloaded by the failed load() call above, or already
     # present from a previous run).
-    model_path = _download(model_name)
+    model_path, _ = get_model_path(model_name)
     mlx_model, mlx_config = load_model(model_path)
 
     # PreTrainedTokenizerFast.from_pretrained does not do the tokenizer-class
@@ -233,10 +254,13 @@ def format_messages_for_llama(
         content_text = extract_text_from_content(message.content)
         formatted_messages.append({"role": message.role, "content": content_text})
 
+    # Ensure we use the actual tokenizer from the processor if it exists
+    actual_tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+
     # Apply chat template if available
-    if tokenizer.chat_template is not None:
+    if actual_tokenizer.chat_template is not None:
         try:
-            result = tokenizer.apply_chat_template(
+            result = actual_tokenizer.apply_chat_template(
                 formatted_messages, add_generation_prompt=True, tokenize=False
             )
             # Ensure we return a string, not tokens
@@ -265,11 +289,14 @@ def count_tokens(text: str) -> int:
         # MLX tokenizers often expect the text to be handled through their specific methods
         # First try the standard approach with proper string handling
         if isinstance(text, str) and text.strip():
+            # Ensure we use the actual tokenizer
+            actual_tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+            
             # For MLX, we may need to use a different approach
             # Try to get tokens using the tokenizer's __call__ method or encode
             try:
                 # Some MLX tokenizers work better with this approach
-                result = tokenizer(text, return_tensors=False, add_special_tokens=False)
+                result = actual_tokenizer(text, return_tensors=False, add_special_tokens=False)
                 if isinstance(result, dict) and "input_ids" in result:
                     return len(result["input_ids"])
                 elif hasattr(result, "__len__"):
@@ -279,7 +306,7 @@ def count_tokens(text: str) -> int:
 
             # Try direct encode without parameters
             try:
-                encoded = tokenizer.encode(text)
+                encoded = actual_tokenizer.encode(text)
                 return (
                     len(encoded) if hasattr(encoded, "__len__") else len(list(encoded))
                 )
@@ -288,7 +315,7 @@ def count_tokens(text: str) -> int:
 
             # Try with explicit string conversion and basic parameters
             try:
-                tokens = tokenizer.encode(str(text), add_special_tokens=False)
+                tokens = actual_tokenizer.encode(str(text), add_special_tokens=False)
                 return len(tokens)
             except (AttributeError, TypeError, ValueError):
                 pass
@@ -347,13 +374,17 @@ async def generate_response(request: MessagesRequest, prompt: str, input_tokens:
     """Generate non-streaming response"""
     # Generate text
     # MLX generate function parameters
-    response_text = generate(
+    response_text = generate_func(
         model,
         tokenizer,
         prompt=prompt,
         max_tokens=request.max_tokens,
         verbose=config.VERBOSE,
     )
+    
+    # Handle mlx_vlm's GenerationResult object return type
+    if hasattr(response_text, "text"):
+        response_text = response_text.text
 
     # Count output tokens
     output_tokens = count_tokens(response_text)
@@ -402,7 +433,7 @@ async def stream_generate_response(
 
     # Stream generation
     for i, response in enumerate(
-        stream_generate(
+        stream_generate_func(
             model,
             tokenizer,
             prompt=prompt,
