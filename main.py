@@ -403,7 +403,7 @@ async def generate_response(request: MessagesRequest, prompt: str, input_tokens:
 async def stream_generate_response(
     request: MessagesRequest, prompt: str, input_tokens: int
 ):
-    """Generate streaming response"""
+    """Generate streaming response with tool call interception"""
     response_id = "msg_" + str(abs(hash(prompt)))[:8]
     full_text = ""
 
@@ -424,50 +424,118 @@ async def stream_generate_response(
     yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
 
     # Send content block start
-    content_start = {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    }
-    yield f"event: content_block_start\ndata: {json.dumps(content_start)}\n\n"
+    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
 
-    # Stream generation
-    for i, response in enumerate(
-        stream_generate_func(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=request.max_tokens,
-        )
-    ):
-        full_text += response.text
+    state = "TEXT"
+    buffer = ""
+    tool_buffer = ""
+    block_index = 0
+    generated_tool = False
 
-        # Send content block delta
-        content_delta = {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": response.text},
-        }
-        yield f"event: content_block_delta\ndata: {json.dumps(content_delta)}\n\n"
+    def emit_text(t: str):
+        if not t: return ""
+        d = {"type": "content_block_delta", "index": block_index, "delta": {"type": "text_delta", "text": t}}
+        return f"event: content_block_delta\ndata: {json.dumps(d)}\n\n"
 
-    # Count output tokens
+    for i, response in enumerate(stream_generate_func(model, tokenizer, prompt=prompt, max_tokens=request.max_tokens)):
+        chunk = response.text
+        full_text += chunk
+        buffer += chunk
+
+        while buffer:
+            if state == "TEXT":
+                idx = buffer.find("<")
+                if idx == -1:
+                    yield emit_text(buffer)
+                    buffer = ""
+                else:
+                    if idx > 0:
+                        yield emit_text(buffer[:idx])
+                        buffer = buffer[idx:]
+                    if len(buffer) < len("<|channel>thought"):
+                        if "<|channel>thought".startswith(buffer) or "<|tool_call>".startswith(buffer):
+                            break  # wait for more
+                        else:
+                            yield emit_text(buffer[0])
+                            buffer = buffer[1:]
+                    else:
+                        if buffer.startswith("<|channel>thought"):
+                            buffer = buffer[len("<|channel>thought"):]
+                            yield emit_text("\n🤔 **Thinking:**\n")
+                            state = "THOUGHT"
+                        elif buffer.startswith("<|tool_call>"):
+                            buffer = buffer[len("<|tool_call>"):]
+                            state = "TOOL"
+                            tool_buffer = ""
+                        else:
+                            yield emit_text(buffer[0])
+                            buffer = buffer[1:]
+            elif state == "THOUGHT":
+                idx = buffer.find("<channel|>")
+                if idx == -1:
+                    last_lt = buffer.rfind("<")
+                    if last_lt == -1:
+                        yield emit_text(buffer)
+                        buffer = ""
+                    else:
+                        if last_lt > 0:
+                            yield emit_text(buffer[:last_lt])
+                        buffer = buffer[last_lt:]
+                        break
+                else:
+                    if idx > 0:
+                        yield emit_text(buffer[:idx])
+                    buffer = buffer[idx + len("<channel|>"):]
+                    yield emit_text("\n\n")
+                    state = "TEXT"
+            elif state == "TOOL":
+                idx = buffer.find("<tool_call|>")
+                if idx == -1:
+                    last_lt = buffer.rfind("<")
+                    if last_lt == -1:
+                        tool_buffer += buffer
+                        buffer = ""
+                    else:
+                        tool_buffer += buffer[:last_lt]
+                        buffer = buffer[last_lt:]
+                        break
+                else:
+                    tool_buffer += buffer[:idx]
+                    buffer = buffer[idx + len("<tool_call|>"):]
+                    
+                    import re
+                    match = re.match(r'call:(\w+)(.*)', tool_buffer, re.DOTALL)
+                    if match:
+                        name = match.group(1)
+                        args = match.group(2).strip()
+                        if not args: args = "{}"
+                        
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+                        block_index += 1
+                        generated_tool = True
+                        
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'tool_use', 'id': 'toolu_' + name, 'name': name, 'input': {}}})}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_index, 'delta': {'type': 'input_json_delta', 'partial_json': args}})}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+                        
+                        block_index += 1
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': block_index, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        
+                    state = "TEXT"
+                    tool_buffer = ""
+
+    if buffer and state == "TEXT":
+        yield emit_text(buffer)
+    elif state == "THOUGHT" and buffer:
+        yield emit_text(buffer)
+
+    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': block_index})}\n\n"
+
     output_tokens = count_tokens(full_text)
-
-    # Send content block stop
-    content_stop = {"type": "content_block_stop", "index": 0}
-    yield f"event: content_block_stop\ndata: {json.dumps(content_stop)}\n\n"
-
-    # Send message delta with usage
-    message_delta = {
-        "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens},
-    }
-    yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
-
-    # Send message stop
-    message_stop = {"type": "message_stop"}
-    yield f"event: message_stop\ndata: {json.dumps(message_stop)}\n\n"
+    stop_reason = "tool_use" if generated_tool else "end_turn"
+    
+    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
+    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
 
 
 @app.get("/health")
