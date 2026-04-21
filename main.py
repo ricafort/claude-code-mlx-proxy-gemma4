@@ -382,6 +382,14 @@ async def create_message(request: MessagesRequest):
         # Count input tokens
         input_tokens = count_tokens(prompt)
 
+        # Protect against OOM crashes on constrained unified memory hardware
+        if input_tokens > config.MAX_CONTEXT_WINDOW:
+            print(f"OOM SAFETY TRIP: Rejected request with {input_tokens} tokens (Limit: {config.MAX_CONTEXT_WINDOW})")
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"Context Window Exceeded: Your prompt contains {input_tokens} tokens, but your Mac hardware limit is safely capped at {config.MAX_CONTEXT_WINDOW} tokens to prevent catastrophic out-of-memory crashes. Please run '/compact' or '/clear' in Claude CLI or strictly constrain your focus via specific 'file.py' references."}}
+            )
+
         if request.stream:
             return StreamingResponse(
                 stream_generate_response(request, prompt, input_tokens),
