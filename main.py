@@ -398,9 +398,10 @@ async def create_message(request: MessagesRequest):
         else:
             return await generate_response(request, prompt, input_tokens)
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens_endpoint(request: TokenCountRequest):
@@ -416,6 +417,8 @@ async def count_tokens_endpoint(request: TokenCountRequest):
 
         return {"input_tokens": token_count}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
