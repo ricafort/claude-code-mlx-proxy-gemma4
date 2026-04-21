@@ -13,7 +13,7 @@ try:
     has_vlm = True
 except ImportError:
     has_vlm = False
-from mlx_lm.utils import load_model, get_model_path
+from mlx_lm.utils import load_model, _download
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from config import config
 
@@ -162,7 +162,7 @@ def _load_model_with_fallback(model_name: str, tokenizer_config: dict):
 
     # Use cached model files (downloaded by the failed load() call above, or already
     # present from a previous run).
-    model_path, _ = get_model_path(model_name)
+    model_path = _download(model_name)
     mlx_model, mlx_config = load_model(model_path)
 
     # PreTrainedTokenizerFast.from_pretrained does not do the tokenizer-class
