@@ -218,11 +218,39 @@ def extract_text_from_content(
         return content
 
     text_parts = []
+    import json
     for block in content:
-        if hasattr(block, "type") and block.type == "text":
-            text_parts.append(block.text)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            text_parts.append(block.get("text", ""))
+        if hasattr(block, "type"):
+            b_type = block.type
+            if b_type == "text":
+                text_parts.append(block.text)
+            elif b_type == "tool_use":
+                in_json = json.dumps(block.input if block.input else {})
+                text_parts.append(f"<|tool_call>call:{block.name}{in_json}<tool_call|>")
+            elif b_type == "tool_result":
+                if isinstance(block.content, list):
+                    res_text = extract_text_from_content(block.content)
+                elif isinstance(block.content, dict):
+                    res_text = json.dumps(block.content)
+                else:
+                    res_text = str(block.content)
+                text_parts.append(f"<|tool_response|>{res_text}<tool_response|>")
+        elif isinstance(block, dict):
+            b_type = block.get("type", "")
+            if b_type == "text":
+                text_parts.append(block.get("text", ""))
+            elif b_type == "tool_use":
+                in_json = json.dumps(block.get("input", {}))
+                text_parts.append(f"<|tool_call>call:{block.get('name')}{in_json}<tool_call|>")
+            elif b_type == "tool_result":
+                c_part = block.get("content", "")
+                if isinstance(c_part, list) and len(c_part) > 0 and isinstance(c_part[0], dict):
+                    res_text = extract_text_from_content(c_part)
+                elif isinstance(c_part, (dict, list)):
+                    res_text = json.dumps(c_part)
+                else:
+                    res_text = str(c_part)
+                text_parts.append(f"<|tool_response|>{res_text}<tool_response|>")
 
     return " ".join(text_parts)
 
